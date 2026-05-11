@@ -185,11 +185,18 @@ class ScreenshareService(private val project: Project) {
                 statusMessage.value = "Lobby live — waiting for host browser to join..."
             }
             PearMessage.USER_JOINED -> {
-                // Someone joined our lobby. If it's the host browser, it will
-                // shortly emit capture_info; nothing to do here proactively.
+                val name = msg.userName?.takeIf { it.isNotBlank() } ?: "Guest"
+                if (!isOwnAvatar(name)) {
+                    overlay?.addBanner("$name joined", OverlayWindow.BannerKind.JOIN)
+                }
             }
             PearMessage.USER_LEFT -> {
-                // A participant left. If it's the host browser, annotations stop arriving.
+                val uid = msg.userId
+                if (uid != null) overlay?.removeCursor(uid)
+                val name = msg.userName?.takeIf { it.isNotBlank() } ?: "Guest"
+                if (!isOwnAvatar(name)) {
+                    overlay?.addBanner("$name left", OverlayWindow.BannerKind.LEAVE)
+                }
             }
             PearMessage.CAPTURE_INFO -> {
                 val w = msg.captureWidth ?: return
@@ -233,6 +240,18 @@ class ScreenshareService(private val project: Project) {
                 statusMessage.value = "Server error: ${msg.message}"
             }
         }
+    }
+
+    /**
+     * The plugin connects as `Host-Overlay`; the host browser tab connects
+     * with the user-configured name. Suppress banners for both so the host
+     * doesn't see a "you joined" or "you left" notification about their own
+     * presence in the lobby.
+     */
+    private fun isOwnAvatar(name: String): Boolean {
+        if (name == "Host-Overlay") return true
+        val configured = PearSettings.getInstance().state.userName.trim()
+        return configured.isNotEmpty() && name == configured
     }
 
     // ── URL helpers ──────────────────────────────────────────────────────

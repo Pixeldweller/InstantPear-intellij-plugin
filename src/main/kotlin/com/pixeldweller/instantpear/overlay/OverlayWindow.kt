@@ -68,6 +68,14 @@ class OverlayWindow(
     private data class ClickBlip(val nx: Double, val ny: Double, val startMs: Long, val color: Color)
     private data class Hint(val nx: Double, val ny: Double, val text: String, val startMs: Long)
 
+    enum class BannerKind { INFO, JOIN, LEAVE }
+    private data class Banner(
+        val text: String,
+        val kind: BannerKind,
+        val startMs: Long,
+        val durationMs: Long,
+    )
+
     private data class NoteHit(
         val id: String,
         val bounds: Rectangle,
@@ -79,6 +87,7 @@ class OverlayWindow(
     private val notes = ConcurrentHashMap<String, Note>()
     private val blips = mutableListOf<ClickBlip>()
     private val hints = mutableListOf<Hint>()
+    private val banners = mutableListOf<Banner>()
 
     @Volatile private var interactive: Boolean = false
 
@@ -104,6 +113,7 @@ class OverlayWindow(
             notes.clear()
             synchronized(blips) { blips.clear() }
             synchronized(hints) { hints.clear() }
+            synchronized(banners) { banners.clear() }
         }
     }
 
@@ -142,6 +152,11 @@ class OverlayWindow(
 
     fun addHint(nx: Double, ny: Double, text: String) {
         synchronized(hints) { hints.add(Hint(nx, ny, text, System.currentTimeMillis())) }
+    }
+
+    fun addBanner(text: String, kind: BannerKind = BannerKind.INFO, durationMs: Long = 2800) {
+        if (text.isBlank()) return
+        synchronized(banners) { banners.add(Banner(text, kind, System.currentTimeMillis(), durationMs)) }
     }
 
     fun upsertNote(id: String, nx: Double, ny: Double, text: String) {
@@ -273,6 +288,7 @@ class OverlayWindow(
             drawHints(g2, now)
             hits = drawNotes(g2)
             drawCursors(g2)
+            drawBanners(g2, now)
         }
 
         private fun drawBlips(g: Graphics2D, now: Long) {
@@ -320,11 +336,15 @@ class OverlayWindow(
                 val padX = 10
                 val padY = 6
                 val textMaxW = 220
-                val tw = fm.stringWidth(n.text).coerceAtMost(textMaxW)
-                val th = fm.height
+                val rawLines = n.text.split('\n')
+                val lines = rawLines.map { ellipsize(it, fm, textMaxW) }
+                val maxLineW = lines.maxOfOrNull { fm.stringWidth(it) } ?: 0
+                val tw = maxLineW.coerceAtMost(textMaxW)
+                val lineHeight = fm.height
+                val textBlockH = lineHeight * lines.size.coerceAtLeast(1)
                 val actionsW = if (showActions) (iconSize * 2 + iconGap + 6) else 0
                 val w = tw + padX * 2 + actionsW
-                val h = maxOf(th + padY * 2, iconSize + padY * 2)
+                val h = maxOf(textBlockH + padY * 2, iconSize + padY * 2)
                 val bx = x - w / 2
                 val by = y - h / 2
 
@@ -336,7 +356,9 @@ class OverlayWindow(
                 g.color = Color(250, 204, 21, 220)
                 g.drawRoundRect(bx, by, w, h, 10, 10)
                 g.color = Color(20, 20, 20)
-                g.drawString(ellipsize(n.text, fm, textMaxW), bx + padX, by + padY + fm.ascent)
+                for ((i, line) in lines.withIndex()) {
+                    g.drawString(line, bx + padX, by + padY + fm.ascent + i * lineHeight)
+                }
 
                 var copyRect = Rectangle(0, 0, 0, 0)
                 var removeRect = Rectangle(0, 0, 0, 0)
@@ -364,6 +386,52 @@ class OverlayWindow(
             val tx = r.x + (r.width - tw) / 2
             val ty = r.y + (r.height - fm.height) / 2 + fm.ascent
             g.drawString(glyph, tx, ty)
+        }
+
+        private fun drawBanners(g: Graphics2D, now: Long) {
+            val snapshot = synchronized(banners) {
+                banners.removeAll { now - it.startMs > it.durationMs }
+                banners.toList()
+            }
+            if (snapshot.isEmpty()) return
+            val gg = g.create() as Graphics2D
+            try {
+                gg.font = gg.font.deriveFont(14f)
+                val fm = gg.fontMetrics
+                val padX = 14
+                val padY = 8
+                val gap = 6
+                var y = 18
+                for (b in snapshot) {
+                    val age = now - b.startMs
+                    val remaining = b.durationMs - age
+                    val alpha = when {
+                        age < 200L -> age / 200.0
+                        remaining < 600L -> (remaining.coerceAtLeast(0L) / 600.0)
+                        else -> 1.0
+                    }.coerceIn(0.0, 1.0)
+
+                    val tw = fm.stringWidth(b.text)
+                    val bw = tw + padX * 2
+                    val bh = fm.height + padY * 2
+                    val bx = width / 2 - bw / 2
+
+                    val (bg, fg) = bannerColors(b.kind)
+                    gg.color = Color(bg.red, bg.green, bg.blue, (alpha * 220).toInt())
+                    gg.fillRoundRect(bx, y, bw, bh, 14, 14)
+                    gg.color = Color(fg.red, fg.green, fg.blue, (alpha * 255).toInt())
+                    gg.drawString(b.text, bx + padX, y + padY + fm.ascent)
+                    y += bh + gap
+                }
+            } finally {
+                gg.dispose()
+            }
+        }
+
+        private fun bannerColors(kind: BannerKind): Pair<Color, Color> = when (kind) {
+            BannerKind.JOIN  -> Color(34, 197, 94)  to Color.WHITE
+            BannerKind.LEAVE -> Color(239, 68, 68)  to Color.WHITE
+            BannerKind.INFO  -> Color(59, 130, 246) to Color.WHITE
         }
 
         private fun drawCursors(g: Graphics2D) {
